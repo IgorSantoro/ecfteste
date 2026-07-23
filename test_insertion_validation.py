@@ -1,7 +1,7 @@
-"""Assistente: interpretação de comandos em português e segurança."""
+"""Reparo automático: remoção de duplicatas únicas + totalizadores."""
 from __future__ import annotations
 
-from editor_ecf.core import Assistente, ParserECF
+from editor_ecf.core import Contador, ParserECF, Reparador
 
 
 def _arq(ecf_bytes, tmp_path):
@@ -10,72 +10,35 @@ def _arq(ecf_bytes, tmp_path):
     return ParserECF().ler(str(p))
 
 
-def test_interpreta_insercao(layout, versao):
-    cmd = Assistente(layout, versao).interpretar(
-        "inserir M310 com COD_CTA = 1.01.01.001")
-    assert cmd.acao == "inserir"
-    assert cmd.registro == "M310"
-    assert cmd.campos == {"COD_CTA": "1.01.01.001"}
-
-
-def test_valor_nao_engole_referencia_ao_registro(layout, versao):
-    """'para 9.99 no M310' → valor é '9.99', não '9.99 no M310'."""
-    cmd = Assistente(layout, versao).interpretar(
-        "alterar COD_CTA para 9.99 no M310 onde COD_CTA = 1.01")
-    assert cmd.campos == {"COD_CTA": "9.99"}
-    assert cmd.filtro == {"COD_CTA": "1.01"}
-
-
-def test_valor_com_espacos_preservado(layout, versao):
-    cmd = Assistente(layout, versao).interpretar(
-        "no 0000, alterar NOME para BANCO DO BRASIL SA")
-    assert cmd.campos["NOME"] == "BANCO DO BRASIL SA"
-
-
-def test_registro_montado_com_num_campos_do_leiaute(layout, versao,
-                                                    ecf_bytes, tmp_path):
-    """Mesmo informando 1 campo, a estrutura sai completa conforme o manual."""
-    ass = Assistente(layout, versao)
-    cmd = ass.interpretar("inserir M310 com COD_CTA = 1.01")
-    novo = ass.registro_para_inserir(cmd)
-    lr = layout.registro(versao, "M310")
-    assert novo.num_campos == lr.num_campos
-
-
-def test_nao_inventa_campo_obrigatorio(layout, versao, ecf_bytes, tmp_path):
+def test_reparo_remove_duplicata_unica(ecf_bytes, layout, versao, tmp_path):
     arq = _arq(ecf_bytes, tmp_path)
-    resp = Assistente(layout, versao).processar("inserir M310", arq)
-    assert not resp.aplicavel          # não aplica
-    assert "COD_CTA" in resp.mensagem  # pergunta pelo campo
+    # duplica o 0000 (registro único [1;1]) de forma idêntica
+    dup = ParserECF().ler_texto(arq.registros[0].para_linha())[0]
+    arq.registros.insert(1, dup)
+    assert arq.contagem_por_tipo()["0000"] == 2
+
+    res = Reparador(layout, versao).reparar(arq)
+    assert arq.contagem_por_tipo()["0000"] == 1
+    assert ("0000", 1) in res.duplicatas_removidas
 
 
-def test_recusa_remover_abertura_de_bloco(layout, versao, ecf_bytes, tmp_path):
+def test_reparo_corrige_totalizadores(ecf_bytes, layout, versao, tmp_path):
     arq = _arq(ecf_bytes, tmp_path)
-    resp = Assistente(layout, versao).processar("remover 0001", arq)
-    assert not resp.aplicavel
-    assert "estrutura" in resp.mensagem.lower()
+    Reparador(layout, versao).reparar(arq)
+    m = {r.reg: r.campos for r in arq.registros}
+    assert m["9999"][1] == str(arq.total_linhas)
+    assert "9990" in m and "0990" in m
 
 
-def test_campo_inexistente_e_rejeitado(layout, versao, ecf_bytes, tmp_path):
+def test_reparo_nao_inventa_valores(ecf_bytes, layout, versao, tmp_path):
+    """Campo obrigatório vazio deve aparecer como pendência, não ser preenchido."""
     arq = _arq(ecf_bytes, tmp_path)
-    resp = Assistente(layout, versao).processar(
-        "inserir M310 com CAMPO_FALSO = 1", arq)
-    assert not resp.aplicavel
-    assert "CAMPO_FALSO" in resp.mensagem
-
-
-def test_consulta_quantos(layout, versao, ecf_bytes, tmp_path):
-    arq = _arq(ecf_bytes, tmp_path)
-    resp = Assistente(layout, versao).processar("quantos 0000 existem?", arq)
-    assert "1 ocorrência" in resp.mensagem
-    assert not resp.aplicavel
-
-
-def test_alteracao_gera_previa_sem_aplicar(layout, versao, ecf_bytes, tmp_path):
-    arq = _arq(ecf_bytes, tmp_path)
-    antes = arq.registros[0].para_linha()
-    resp = Assistente(layout, versao).processar(
-        "no 0000, alterar NOME para OUTRA EMPRESA LTDA", arq)
-    assert resp.aplicavel and resp.previa
-    # nada foi alterado ainda: prévia é só simulação
-    assert arq.registros[0].para_linha() == antes
+    # insere M310 sem COD_CTA (obrigatório) para gerar pendência
+    m310 = ParserECF().ler_texto("|M310||")[0]
+    # coloca dentro do bloco M seria o certo, mas para o teste basta existir
+    arq.registros.insert(1, m310)
+    res = Reparador(layout, versao).reparar(arq)
+    assert any("M310" in p and "COD_CTA" in p for p in res.pendencias)
+    # o valor não foi inventado
+    m310_final = [r for r in arq.registros if r.reg == "M310"][0]
+    assert m310_final.campo(1).strip() == ""

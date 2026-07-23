@@ -1,40 +1,41 @@
-"""Fixtures compartilhadas dos testes."""
+"""Ponto de entrada do Editor Inteligente de SPED ECF.
+
+Uso:
+    python -m editor_ecf.main
+ou:
+    python editor_ecf/main.py
+"""
 from __future__ import annotations
 
 import os
+import sys
 
-import pytest
-
-from editor_ecf.core import LayoutLoader
-
+# Permite executar tanto como módulo quanto como script solto.
 _RAIZ = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-PASTA_LAYOUTS = os.path.join(_RAIZ, "layouts")
+if _RAIZ not in sys.path:
+    sys.path.insert(0, _RAIZ)
+
+from PySide6.QtWidgets import QApplication  # noqa: E402
+
+from editor_ecf.controller import ControladorECF  # noqa: E402
+from editor_ecf.ui import JanelaPrincipal, Tema, aplicar_tema  # noqa: E402
+
+_PASTA = os.path.dirname(os.path.abspath(__file__))
+PASTA_LAYOUTS = os.path.join(_PASTA, "layouts")
+PASTA_LOGS = os.path.join(_PASTA, "logs")
 
 
-@pytest.fixture(scope="session")
-def layout() -> LayoutLoader:
-    return LayoutLoader(PASTA_LAYOUTS)
+def main() -> int:
+    app = QApplication(sys.argv)
+    app.setApplicationName("Editor Inteligente de SPED ECF")
+    aplicar_tema(app, Tema.DARK)
+
+    controlador = ControladorECF(pasta_layouts=PASTA_LAYOUTS,
+                                 pasta_logs=PASTA_LOGS)
+    janela = JanelaPrincipal(controlador, app)
+    janela.show()
+    return app.exec()
 
 
-@pytest.fixture(scope="session")
-def versao(layout: LayoutLoader) -> str:
-    return "0012"
-
-
-@pytest.fixture()
-def ecf_bytes() -> bytes:
-    """ECF sintética mínima, mas estruturalmente coerente, em latin-1/CRLF.
-
-    Totalizadores propositalmente 'errados' para os testes de recontagem
-    provarem que o Contador os corrige.
-    """
-    linhas = [
-        "|0000|LECF|0012|02139940000191|EMPRESA TESTE LTDA|"
-        "01012025|31122025|0|0|N|N|N||",
-        "|0001|0|",
-        "|0990|1|",                       # errado de propósito (deveria ser 3)
-        "|9001|0|",
-        "|9990|0|",                       # errado de propósito
-        "|9999|0|",                       # errado de propósito
-    ]
-    return ("\r\n".join(linhas) + "\r\n").encode("latin-1")
+if __name__ == "__main__":
+    raise SystemExit(main())

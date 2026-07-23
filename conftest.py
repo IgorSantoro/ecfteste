@@ -1,44 +1,40 @@
-"""Reparo automático: remoção de duplicatas únicas + totalizadores."""
+"""Parser + Exportador: fidelidade de bytes (encoding, CRLF, ordem)."""
 from __future__ import annotations
 
-from editor_ecf.core import Contador, ParserECF, Reparador
+import os
+
+import pytest
+
+from editor_ecf.core import Exportador, ParserECF
+
+REAL = os.environ.get("ECF_REAL", "")
 
 
-def _arq(ecf_bytes, tmp_path):
-    p = tmp_path / "in.txt"
-    p.write_bytes(ecf_bytes)
-    return ParserECF().ler(str(p))
+def test_roundtrip_sintetico(ecf_bytes, tmp_path):
+    origem = tmp_path / "in.txt"
+    origem.write_bytes(ecf_bytes)
+
+    arq = ParserECF().ler(str(origem))
+    saida = Exportador().para_bytes(arq)
+
+    assert saida == ecf_bytes, "round-trip deveria ser byte-idêntico"
+    assert arq.encoding.lower() in ("latin-1", "iso-8859-1")
+    assert arq.nova_linha == "\r\n"
 
 
-def test_reparo_remove_duplicata_unica(ecf_bytes, layout, versao, tmp_path):
-    arq = _arq(ecf_bytes, tmp_path)
-    # duplica o 0000 (registro único [1;1]) de forma idêntica
-    dup = ParserECF().ler_texto(arq.registros[0].para_linha())[0]
-    arq.registros.insert(1, dup)
-    assert arq.contagem_por_tipo()["0000"] == 2
-
-    res = Reparador(layout, versao).reparar(arq)
-    assert arq.contagem_por_tipo()["0000"] == 1
-    assert ("0000", 1) in res.duplicatas_removidas
+def test_campos_preservados(ecf_bytes, tmp_path):
+    origem = tmp_path / "in.txt"
+    origem.write_bytes(ecf_bytes)
+    arq = ParserECF().ler(str(origem))
+    r0000 = arq.registros[0]
+    assert r0000.reg == "0000"
+    assert r0000.campos[3] == "02139940000191"  # CNPJ preservado
 
 
-def test_reparo_corrige_totalizadores(ecf_bytes, layout, versao, tmp_path):
-    arq = _arq(ecf_bytes, tmp_path)
-    Reparador(layout, versao).reparar(arq)
-    m = {r.reg: r.campos for r in arq.registros}
-    assert m["9999"][1] == str(arq.total_linhas)
-    assert "9990" in m and "0990" in m
-
-
-def test_reparo_nao_inventa_valores(ecf_bytes, layout, versao, tmp_path):
-    """Campo obrigatório vazio deve aparecer como pendência, não ser preenchido."""
-    arq = _arq(ecf_bytes, tmp_path)
-    # insere M310 sem COD_CTA (obrigatório) para gerar pendência
-    m310 = ParserECF().ler_texto("|M310||")[0]
-    # coloca dentro do bloco M seria o certo, mas para o teste basta existir
-    arq.registros.insert(1, m310)
-    res = Reparador(layout, versao).reparar(arq)
-    assert any("M310" in p and "COD_CTA" in p for p in res.pendencias)
-    # o valor não foi inventado
-    m310_final = [r for r in arq.registros if r.reg == "M310"][0]
-    assert m310_final.campo(1).strip() == ""
+@pytest.mark.skipif(not REAL or not os.path.exists(REAL),
+                    reason="defina ECF_REAL apontando para uma ECF real")
+def test_roundtrip_arquivo_real():
+    with open(REAL, "rb") as f:
+        original = f.read()
+    arq = ParserECF().ler(REAL)
+    assert Exportador().para_bytes(arq) == original

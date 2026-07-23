@@ -1,79 +1,71 @@
-"""Diálogo de relatório de validação.
+"""Parser do arquivo SPED ECF (.txt).
 
-Exibe as ocorrências (erros, avisos, informações) em tabela colorida.
+Lê o arquivo preservando encoding (ISO-8859-1/latin-1) e terminadores de
+linha (CRLF), constrói a árvore em memória (``ArquivoECF``) e extrai
+metadados do registro 0000.
 """
 from __future__ import annotations
 
-from typing import List
+from typing import Tuple
 
-from PySide6.QtCore import Qt
-from PySide6.QtGui import QColor
-from PySide6.QtWidgets import (
-    QDialog, QDialogButtonBox, QHBoxLayout, QLabel, QTableWidget,
-    QTableWidgetItem, QVBoxLayout,
-)
-
-from ..core.validator import Nivel, Ocorrencia
-from .theme import ERRO, INFO, OK, WARN
-
-_COR = {Nivel.ERRO: ERRO, Nivel.AVISO: WARN, Nivel.INFO: INFO}
+from ..models import ArquivoECF, Registro
 
 
-class ValidationDialog(QDialog):
-    def __init__(self, ocorrencias: List[Ocorrencia], parent=None) -> None:
-        super().__init__(parent)
-        self.setWindowTitle("Relatório de validação")
-        self.setMinimumSize(760, 480)
-        self._montar(ocorrencias)
+class ParserECF:
+    """Converte bytes do TXT em um ``ArquivoECF``."""
 
-    def _montar(self, ocs: List[Ocorrencia]) -> None:
-        lay = QVBoxLayout(self)
-        lay.setContentsMargins(18, 18, 18, 18)
-        lay.setSpacing(12)
+    def ler(self, caminho: str) -> ArquivoECF:
+        with open(caminho, "rb") as fh:
+            bruto = fh.read()
+        return self.ler_bytes(bruto, caminho_original=caminho)
 
-        n_erro = sum(1 for o in ocs if o.nivel == Nivel.ERRO)
-        n_aviso = sum(1 for o in ocs if o.nivel == Nivel.AVISO)
-        n_info = sum(1 for o in ocs if o.nivel == Nivel.INFO)
+    def ler_bytes(self, bruto: bytes,
+                  caminho_original: str = "") -> ArquivoECF:
+        """Interpreta o conteúdo de uma ECF a partir de bytes (ex.: upload)."""
+        encoding = self._detectar_encoding(bruto)
+        nova_linha = "\r\n" if b"\r\n" in bruto else "\n"
+        texto = bruto.decode(encoding, errors="replace")
 
-        cab = QHBoxLayout()
-        titulo = QLabel("Resultado da validação estrutural")
-        titulo.setObjectName("H2")
-        cab.addWidget(titulo)
-        cab.addStretch(1)
-        for rot, val, cor in (("Erros", n_erro, ERRO),
-                              ("Avisos", n_aviso, WARN),
-                              ("Infos", n_info, INFO)):
-            chip = QLabel(f"● {rot}: {val}")
-            chip.setStyleSheet(f"color:{cor}; font-weight:600;")
-            cab.addWidget(chip)
-        lay.addLayout(cab)
+        arquivo = ArquivoECF(
+            encoding=encoding,
+            nova_linha=nova_linha,
+            caminho_original=caminho_original,
+        )
+        linhas = texto.split(nova_linha)
+        num = 0
+        for linha in linhas:
+            if not linha.strip():
+                continue
+            num += 1
+            # Um registro válido começa por '|' e possui pelo menos |REG|
+            if not linha.startswith("|"):
+                continue
+            arquivo.registros.append(Registro.de_linha(linha, origem=num))
 
-        if not ocs:
-            ok = QLabel("Nenhuma inconsistência encontrada. Estrutura íntegra.")
-            ok.setStyleSheet(f"color:{OK}; font-weight:600; font-size:14px;")
-            ok.setAlignment(Qt.AlignCenter)
-            lay.addWidget(ok, 1)
-        else:
-            tab = QTableWidget(len(ocs), 5)
-            tab.setHorizontalHeaderLabels(
-                ["Nível", "Registro", "Linha", "Regra", "Mensagem"])
-            tab.setEditTriggers(QTableWidget.NoEditTriggers)
-            tab.setAlternatingRowColors(True)
-            tab.verticalHeader().setVisible(False)
-            for i, o in enumerate(ocs):
-                item_nivel = QTableWidgetItem(o.nivel.value)
-                item_nivel.setForeground(QColor(_COR.get(o.nivel, INFO)))
-                tab.setItem(i, 0, item_nivel)
-                tab.setItem(i, 1, QTableWidgetItem(o.registro))
-                tab.setItem(i, 2, QTableWidgetItem(str(o.linha or "-")))
-                tab.setItem(i, 3, QTableWidgetItem(o.regra))
-                tab.setItem(i, 4, QTableWidgetItem(o.mensagem))
-            tab.resizeColumnsToContents()
-            tab.horizontalHeader().setStretchLastSection(True)
-            lay.addWidget(tab, 1)
+        arquivo.atualizar_metadados_do_0000()
+        return arquivo
 
-        botoes = QDialogButtonBox(QDialogButtonBox.Close)
-        botoes.rejected.connect(self.reject)
-        botoes.accepted.connect(self.accept)
-        botoes.button(QDialogButtonBox.Close).clicked.connect(self.accept)
-        lay.addWidget(botoes)
+    def ler_texto(self, texto: str) -> list[Registro]:
+        """Interpreta um trecho colado (várias linhas ``|REG|...|``)."""
+        registros: list[Registro] = []
+        for linha in texto.replace("\r\n", "\n").split("\n"):
+            linha = linha.strip()
+            if not linha or not linha.startswith("|"):
+                continue
+            registros.append(Registro.de_linha(linha))
+        return registros
+
+    # ------------------------------------------------------------------ #
+    @staticmethod
+    def _detectar_encoding(bruto: bytes) -> str:
+        """SPED ECF usa ISO-8859-1. Tenta UTF-8 só como fallback seguro."""
+        try:
+            bruto.decode("utf-8")
+            # Se decodifica em UTF-8 sem erro E contém acentos multibyte,
+            # ainda assim mantemos latin-1 como padrão do SPED, exceto se
+            # houver BOM/estrutura UTF-8 clara.
+            if bruto.startswith(b"\xef\xbb\xbf"):
+                return "utf-8-sig"
+        except UnicodeDecodeError:
+            pass
+        return "latin-1"
